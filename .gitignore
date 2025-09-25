@@ -1,0 +1,24 @@
+# First, ignore everything
+*
+*doc*
+*xlsx*
+
+# Allow directories
+!/*
+
+# Only keep useful text files
+!*.R
+!*.sh
+!*.pl
+!*README.md
+!*.smk
+!*.pbs
+!*.Rmd
+!*.slim
+!*.slurm
+!.gitignore
+!*.yaml
+!*.txt*
+
+# And finally ignore all binary files
+*._*
