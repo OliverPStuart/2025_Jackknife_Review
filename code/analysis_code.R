@@ -18,6 +18,7 @@ library(ggplot2)
 library(magrittr)
 library(dplyr)
 library(patchwork)
+library(distributions3)
 
 # Functions
 # Function to generate bootstrap resample
@@ -55,8 +56,40 @@ jackknife <- function(x){
 
 # Standard error from jackknife distribution
 jackknife_se <- function(x){
-  sqrt(((length(x) - 1) / length(x)) * sum((x - mean(x))^2))
+  return(sqrt(((length(x) - 1) / length(x)) * sum((x - mean(x))^2)))
 }
+
+# Standard error from weighted block jackknife
+weighted_jackknife_se <- function(x,m){
+  
+  n=sum(m)
+  theta_hat=weighted.mean(x,m)
+  
+  term1=(n-m)/m
+  term2=(theta_hat - x)^2
+  
+  result=sqrt(mean(term1*term2))
+  return(result)
+  
+}
+# x is the vector of values from jackknife replicates
+# m is the vector of the number of snps in each block
+# the given block corresponds to the block that is left out of the jackknife replicate
+
+# Mean from weighted block jackknife
+weighted_jackknife_mean <- function(x,m,theta_hat){
+  
+  g=length(x)
+  n=sum(m)
+  
+  result=g*theta_hat - sum(((n-m)*x)/n)
+  
+  return(result)
+  
+}
+# x is the vector of values from jackknife replicates
+# m is the vector of the number of snps in each block
+# the given block corresponds to the block that is left out of the jackknife replicate
 
 # Classify MAFs
 classify_maf <- function(x){
@@ -76,8 +109,8 @@ classify_maf <- function(x){
 # How do bootstrap and jackknife distributions compare?
 samples <- rnorm(100,0,1)
 p1 <- data.frame(Mean=c(jackknife(samples),
-                              bootstrap(samples)),
-                       Type=rep(c("Jackknife","Bootstrap"),each=100)) %>%
+                        bootstrap(samples)),
+                 Type=rep(c("Jackknife","Bootstrap"),each=100)) %>%
   ggplot(aes(x=Mean,after_stat(scaled),fill=Type)) +
   geom_density() + 
   scale_y_continuous(limits=c(0,1.05),expand=c(0,0)) +
@@ -100,26 +133,26 @@ Ns <- c(100,200,300,400,500,600,700,800,900,1000)
 Reps <- 100
 
 results <- data.frame(Ns=rep(Ns,each=Reps),
-           Empirical_SE=NA,
-           Bootstrap_SD=NA,
-           Jackknife_SD=NA,
-           Jackknife_Mean_Bias=NA,
-           Bootstrap_Mean_Bias=NA)
+                      Empirical_SE=NA,
+                      Bootstrap_SD=NA,
+                      Jackknife_SD=NA,
+                      Jackknife_Mean_Bias=NA,
+                      Bootstrap_Mean_Bias=NA)
 
 for(i in 1:nrow(results)){
   
   N=results$Ns[i]
   if(i %% Reps==1){print(N)}
-
+  
   # Take sample
   samples <- rnorm(N,mean=0,sd=1)
-    
+  
   # Calculate the empirical SE and SDs from bootstrap and jackknife
   results$Empirical_SE[i]=sd(samples)/sqrt(N)
   results$Bootstrap_SD[i]=sd(bootstrap(samples))
   results$Jackknife_SD[i]=sd(jackknife(samples))
   results$Jackknife_SE[i]=jackknife_se(jackknife(samples))
-
+  
 }
 
 # How bad do jackknife and bootstrap do at estimating the standard error?
@@ -209,6 +242,13 @@ dev.off()
 ############################################
 ############################################
 
+###
+### Load in data
+###
+
+# Get scaffold lengths for block definitions
+lengths <- read.table("data/lengths.txt",header=F,stringsAsFactors = F)
+colnames(lengths) <- c("Scaffold","Length")
 
 # Read in allele frequency data
 effects <- read.table("data/allele_frequency_data.txt.gz",header=T)
@@ -225,105 +265,8 @@ rxy <- effects %>%
 # Order the data.frame by Scaffold and Position
 rxy <- rxy[order(rxy$Scaffold, rxy$Position), ]
 
-# Initialise block column
-rxy$Block <- NA
-
-# Get scaffolds
-scafs <- unique(rxy$Scaffold)
-
-# Total number of blocks desired
-# This is what gives us exactly 100 blocks of roughly equal size
-total_blocks <- 94
-
-# Total number of entries
-total_entries <- nrow(rxy)
-
-# Calculate the rough number of entries per block
-rough_block_size <- ceiling(total_entries / total_blocks)
-
-# Loop over scaffolds to define blocks algorithmically
-for(i in 1:length(scafs)){
-  
-  # Get entries
-  entries <- rxy[rxy$Scaffold==scafs[i],]
-  
-  # How many blocks roughly in scaffold?
-  blocks_in <- ceiling(nrow(entries)/rough_block_size)
-  
-  # Make a vector of block assignments
-  blocks_assign <- sort(rep(1:blocks_in, length.out=nrow(entries)))
-  
-  # Add block assignments to data.frame
-  # If it's not the first scaffold, add previous values to get correct block ID
-  if(i == 1){
-    
-    rxy$Block[rxy$Scaffold==scafs[i]] <- blocks_assign
-    
-  } else {
-    
-    blocks_assign <- blocks_assign + max(rxy$Block[rxy$Scaffold==scafs[i-1]])
-    rxy$Block[rxy$Scaffold==scafs[i]] <- blocks_assign
-    
-  }
-}
-
-n_blocks <- max(rxy$Block)
-
-# Now jackknife over the blocks to get Rxy estimates for each variant effect
-# Jackknife, blocks
-for(i in 1:n_blocks){
-  
-  # Remove block, calculate RXY, assign to temp data.frame
-  assign(paste0("jack_rxy_",i),
-         rxy %>% filter(Block != i) %>% 
-           group_by(Variant_Effect) %>%
-           dplyr::summarise(RXY=sum(LXY)/sum(LYX),Rep=i,Type="Jackknife"))
-  
-}
-
-# Collate results 
-table_names <- ls(pattern = "^jack_rxy_")
-table_list <- mget(table_names)
-rxy_jack <- do.call(rbind, table_list)
-rm(list=ls(pattern = "^jack_rxy_"))
-
-# Do the same but bootstrap
-for(i in 1:n_blocks){
-  
-  if(i %% 10 == 0){print(i)}
-  
-  # Decide which blocks to select
-  blocks <- sort(sample(1:n_blocks,n_blocks,replace=T))
-  
-  # Now generate block resamples
-  for(j in 1:n_blocks){
-    assign(paste0("tmp_",j),
-           rxy[rxy$Block==blocks[j],])
-  }
-  
-  # Paste into a single data.frame
-  table_names <- ls(pattern = "^tmp_")
-  table_list <- mget(table_names)
-  rxy_tmp <- do.call(rbind, table_list)
-  rm(list=ls(pattern = "^tmp_"))
-  
-  # Calculate boostrapped Rxy for all classes
-  assign(paste0("boot_rxy_",i),
-         rxy_tmp %>% 
-           group_by(Variant_Effect) %>%
-           dplyr::summarise(RXY=sum(LXY)/sum(LYX),Rep=i,Type="Bootstrap"))
-  
-  rm(rxy_tmp)
-}
-
-# Collate results 
-table_names <- ls(pattern = "^boot_rxy_")
-table_list <- mget(table_names)
-rxy_boot <- do.call(rbind, table_list)
-rm(list=ls(pattern = "^boot_rxy_"))
-
-# Combine them! And refactor for plot ordering
-rxy_dat <- rbind(rxy_jack,rxy_boot) %>%
+# Refactor variant_effect for plotting
+rxy <- rxy %>%
   mutate(Variant_Effect = factor(Variant_Effect,
                                  levels=c("MODIFIER",
                                           "LOW",
@@ -334,93 +277,268 @@ rxy_dat <- rbind(rxy_jack,rxy_boot) %>%
                                           "MODERATE",
                                           "HIGH")))
 
+###
+### Generate blocks
+###
+
+# Number of blocks
+n_blocks <- 101
+
+# Compute total length and block size
+total_len <- sum(lengths$Length)
+block_size <- total_len / n_blocks
+
+# Generate block boundaries
+blocks <- data.frame()
+
+for (i in seq_len(nrow(lengths))) {
+  chr <- lengths$Scaffold[i]
+  chr_len <- lengths$Length[i]
+  
+  # number of blocks for this chromosome, at least 1
+  n_chr <- max(1, round(chr_len / block_size))
+  chr_block_size <- chr_len / n_chr
+  
+  # initial equal blocks inside this chromosome
+  edges <- round(seq(1, chr_len + 1, length.out = n_chr + 1))
+  starts <- edges[-length(edges)]
+  ends   <- edges[-1] - 1
+  df <- data.frame(Scaffold = chr, Start = starts, End = ends)
+  
+  # --- redistribute the last block if small ---
+  k <- nrow(df)
+  if (k >= 2) {
+    last_size <- df$End[k] - df$Start[k] + 1L
+    frac <- last_size / chr_block_size  # compare to *local* block size
+    
+    if (last_size > 0 && frac <= 0.75) {
+      if (frac <= 0.25)      m <- 2
+      else                   m <- 3
+      m <- min(m, k - 1L)
+      
+      sizes <- df$End - df$Start + 1L
+      add_base <- last_size %/% m
+      rem      <- last_size - add_base * m
+      
+      idx <- seq.int(k - m, k - 1)
+      sizes[idx] <- sizes[idx] + add_base
+      if (rem > 0L) sizes[tail(idx, rem)] <- sizes[tail(idx, rem)] + 1L
+      
+      # drop the last block and rebuild Start/End
+      sizes <- sizes[-k]
+      new_starts <- cumsum(c(1, head(sizes, -1)))
+      new_ends   <- cumsum(sizes)
+      df <- data.frame(Scaffold = chr, Start = new_starts, End = new_ends)
+    }
+    # if frac > 0.75 → leave df unchanged
+  }
+  
+  blocks <- rbind(blocks, df)
+}
+
+n_blocks <- nrow(blocks)
+blocks$Block=1:n_blocks
+
+# Now loop over every row in the rxy data.frame and assign it its block
+rxy$Block <- NA
+for(i in 1:nrow(rxy)){
+  
+  rxy$Block[i] <- blocks %>% filter(Scaffold == rxy$Scaffold[i],
+                                    Start <= rxy$Position[i],
+                                    End  >= rxy$Position[i]) %>%
+    pull(Block)
+  
+}
+
+
+###
+### Jackknife and bootstrap over blocks
+###
+
+# Jackknife, blocks
+for(i in 1:n_blocks){
+  
+  # Remove block, calculate RXY, assign to temp data.frame
+  assign(paste0("jack_rxy_",i),
+         rxy %>% filter(Block != i) %>% 
+           group_by(Variant_Effect) %>%
+           dplyr::summarise(RXY=sum(LXY)/sum(LYX),
+                            Rep=i,
+                            Type="Jackknife",
+                            Block="Block",
+                            N_Loci_Excl=sum(rxy$Block==i)))
+  
+}
+
+# Collate results 
+table_names <- ls(pattern = "^jack_rxy_")
+table_list <- mget(table_names)
+rxy_jack_block <- do.call(rbind, table_list)
+rm(list=ls(pattern = "^jack_rxy_"))
+
+###
+### Jackknife over chromosomes
+###
+
+chroms <- unique(effects$Scaffold)
+
+# Jackknife, chroms
+for(i in 1:length(chroms)){
+  
+  # Remove block, calculate RXY, assign to temp data.frame
+  assign(paste0("jack_rxy_",i),
+         rxy %>% filter(Scaffold != chroms[i]) %>% 
+           group_by(Variant_Effect) %>%
+           dplyr::summarise(RXY=sum(LXY)/sum(LYX),
+                            Rep=i,
+                            Type="Jackknife",
+                            Block="Chromosome",
+                            N_Loci_Excl=sum(rxy$Scaffold==chroms[i])))
+  
+}
+
+# Collate results 
+table_names <- ls(pattern = "^jack_rxy_")
+table_list <- mget(table_names)
+rxy_jack_chrom <- do.call(rbind, table_list)
+rm(list=ls(pattern = "^jack_rxy_"))
+
+
+###
+### Combine data and produce plots and run tests
+###
+
+
+# Combine them! And refactor for plot ordering
+rxy_dat <- rbind(rxy_jack_block,
+                 rxy_jack_chrom)
+
 # Calculate per-rep per-type the standardised RXY (wrt neutral/modifier alleles)
 rxy_dat <- rxy_dat %>%
-  group_by(Rep,Type) %>%
+  group_by(Rep,Type,Block) %>%
   mutate(Order=ifelse(Variant_Effect=="MODIFIER",0,1)) %>%
   arrange(Order) %>%
   mutate(RXY_St=RXY/first(RXY))
 
-# Plot the raw distributions of RXY for the three mutation types
-rxy_dists <- ggplot(rxy_dat %>% filter(Variant_Effect != "MODIFIER"),
-       aes(x=Variant_Effect,y=RXY_St)) + 
-  geom_boxplot(outlier.size = 0.8) + facet_wrap(~Type,nrow=1) +
+# Also, just for presentation's sake, calculate the whole-genome values
+rxy_all <- rxy %>%
+  group_by(Variant_Effect) %>%
+  dplyr::summarise(RXY=sum(LXY)/sum(LYX)) %>%
+  mutate(Order=ifelse(Variant_Effect=="MODIFIER",0,1)) %>%
+  arrange(Order) %>%
+  mutate(RXY_All=RXY/first(RXY))
+
+# Now use the whole genome values as input to the weighted block jackknife mean
+rxy_se <- rxy_dat %>%
+  filter(Variant_Effect != "MODIFIER") %>%
+  merge(.,rxy_all[,c(1,4)]) %>%
+  group_by(Block,Variant_Effect) %>%
+  dplyr::summarise(Mean=weighted_jackknife_mean(x=RXY_St,m=N_Loci_Excl,theta_hat=first(RXY_All)),
+                   SE=weighted_jackknife_se(x=RXY_St,m=N_Loci_Excl))
+
+### Now plot the whole-genome values as a single figure
+rxy_points <- rxy_all %>% filter(Variant_Effect != "MODIFIER") %>%
+  ggplot(aes(x=Variant_Effect,y=RXY_All)) + 
+  geom_point(pch=23,size=2,stroke=0.2,fill="lightgrey") +
   scale_x_discrete(labels=c("Low","Moderate","High")) + 
-  scale_y_continuous(breaks=c(0.6,0.8,1,1.2),
-                     limits=c(0.5,1.22)) + 
-  geom_hline(yintercept=1,linewidth=1,linetype="dashed",colour="cornflowerblue") + 
+  geom_hline(yintercept=1,linewidth=0.75,linetype="dashed",colour="cornflowerblue") + 
   theme_bw() + 
   theme(axis.ticks=element_blank(),
         panel.grid=element_blank(),
         axis.text.x=element_text(angle=45,hjust=1,vjust=1.1)) + 
-  labs(y=expression(R[(Captive/Wild)]),
+  labs(y=expression(R[XY]),
        x="Predicted impact")
-png("figures/jackknife_v_bootstrap_empirical_dist.png",res=300,width=3,height=4,units='in')
-rxy_dists
+
+png("figures/rxy_raw.png",res=300,width=3,height=3,units='in')
+plot(rxy_points)
 dev.off()
 
-# Now calculate the distribution of differences between each class and 0
-rxy_dat <- rxy_dat %>%
-  group_by(Rep,Type) %>%
-  mutate(Order=ifelse(Variant_Effect=="MODIFIER",0,1)) %>%
-  arrange(Order) %>%
-  mutate(RXY_Diff=RXY-first(RXY))
+### Generate two plots, one of the raw distributions, one of jackknife SEs
 
-# Produce a figure of points and standard errors
-rxy_dat_jack <- rxy_dat %>% filter(Variant_Effect != "MODIFIER",
-                                   Type=="Jackknife") %>%
-  group_by(Variant_Effect) %>%
-  dplyr::summarise(Mean=mean(RXY_Diff),
-                   SD=sd(RXY_Diff),
-                   SE=jackknife_se(RXY_Diff))
-rxy_dat_boot <- rxy_dat %>% filter(Variant_Effect != "MODIFIER",
-                                   Type=="Bootstrap") %>%
-  group_by(Variant_Effect) %>%
-  dplyr::summarise(Mean=mean(RXY_Diff),
-                   SD=sd(RXY_Diff))
+rxy_dists <- ggplot(rxy_dat %>% filter(Variant_Effect != "MODIFIER"),
+                    aes(x=Variant_Effect,y=RXY_St)) + 
+  geom_boxplot(outlier.size = 0.8) + 
+  facet_grid(Block~.) +
+  scale_x_discrete(labels=c("Low","Moderate","High")) + 
+  scale_y_continuous(breaks=c(0.6,0.8,1,1.2),
+                     limits=c(0.55,1.11)) + 
+  geom_hline(yintercept=1,linewidth=0.8,linetype="dashed",colour="cornflowerblue") + 
+  theme_bw() + 
+  theme(axis.ticks=element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x=element_text(angle=45,hjust=1,vjust=1.1),
+        strip.background = element_blank(),
+        strip.text.y = element_blank(),
+        plot.title=element_text(hjust=0.5,size=10)) + 
+  labs(y=expression(R[XY]),
+       x="Predicted impact",
+       title="Jackknife pseudo-values")
 
-rxy_dat_jack %>%
-  ggplot(aes(x=Variant_Effect,Mean)) +
+rxy_se_comp <- rxy_se %>% 
+  ggplot(aes(x=Variant_Effect,y=Mean)) +
   geom_errorbar(aes(ymin=Mean-SE,ymax=Mean+SE),width=0) + 
-  geom_errorbar(aes(ymin=Mean-SD,ymax=Mean+SD),width=0,linewidth=1.5) + 
-  geom_point(size=2)
+  geom_point(size=1.25) +
+  facet_grid(Block~.) +
+  geom_hline(yintercept=1,linewidth=0.8,linetype="dashed",colour="cornflowerblue") + 
+  theme_bw() + 
+  theme(axis.ticks=element_blank(),
+        panel.grid=element_blank(),
+        axis.text.x=element_text(angle=45,hjust=1,vjust=1.1),
+        strip.background = element_blank(),
+        strip.text.y = element_blank(),
+        plot.title=element_text(hjust=0.5,size=10)) + 
+  labs(y=expression(R[XY]),
+       x="Predicted impact",
+       title="Mean ± weighted jackknife SE") +
+  scale_x_discrete(labels=c("Low","Moderate","High")) + 
+  scale_y_continuous(breaks=c(0.6,0.8,1,1.2),
+                     limits=c(0.55,1.11))
 
-rxy_dat_boot %>%
-  ggplot(aes(x=Variant_Effect,Mean)) +
-  geom_errorbar(aes(ymin=Mean-SD,ymax=Mean+SD),width=0) + 
-  geom_point(size=2)
+# Empty figure for chromosome v 
+label_plot <- ggplot(data=data.frame(x=c(0,0),y=c(0,0),Block=c("Chromosome","Block"))) + 
+  geom_text(aes(x=x,y=y,label=Block),
+            angle=270,size=10/.pt,vjust=1.95) + 
+  facet_grid(Block~.) + 
+  theme_void() + 
+  theme(strip.text.y = element_blank(),
+        plot.margin = unit(c(0,0,0,0),"cm"))
 
+png("figures/jackknife_se_comparison.png",res=300,width=6,height=6,units='in')
+rxy_dists + plot_spacer() + rxy_se_comp + plot_spacer() +label_plot + 
+  plot_layout(axes="collect",
+              widths=c(4,-0.4,4,-0.4,1))
+dev.off()
 
-# Do three sets of tests on differences between deleterious and neutral
+# Now do a series of t-tests comparing whether each category differs from neutral
 
-# 1. SD of bootstrap, accurate estimate of SE
-rxy_dat %>%
-  filter(Type=="Bootstrap",Variant_Effect!="MODIFIER") %>%
-  group_by(Variant_Effect) %>%
-  dplyr::summarise(Mean_RXY=mean(RXY_Diff),
-                   SE_RXY=sd(RXY_Diff)) %>%
-  mutate(T_Stat=Mean_RXY / SE_RXY,
-         P_Value=2 * pt(-abs(T_Stat), df = n_blocks - 1))
+# Using the actual means and SEs to do it PROPERLY
 
-# 2. SD of jackknife, inaccurate estimate of SE
-rxy_dat %>%
-  filter(Type=="Jackknife",Variant_Effect!="MODIFIER") %>%
-  group_by(Variant_Effect) %>%
-  dplyr::summarise(Mean_RXY=mean(RXY_Diff),
-                   SE_RXY=sd(RXY_Diff)) %>%
-  mutate(T_Stat=Mean_RXY / SE_RXY,
-         P_Value=2 * pt(-abs(T_Stat), df = n_blocks - 1))
+# Effectively a paired t-test, since what is being tested here is the DIFFERENCE between each class and neutral
+rxy_se %>% 
+  mutate(N=ifelse(Block=="Block",100,16),
+         T_test_t=(Mean-1)/SE,
+         T_test_p=pt(q=T_test_t,df=N-1))
 
-# 3. SE of jackknife, accurate estimate of SE
-rxy_dat %>%
-  filter(Type=="Jackknife",Variant_Effect!="MODIFIER") %>%
-  group_by(Variant_Effect) %>%
-  dplyr::summarise(Mean_RXY=mean(RXY_Diff),
-                   SE_RXY=jackknife_se(RXY_Diff)) %>%
-  mutate(T_Stat=Mean_RXY / SE_RXY,
-         P_Value=2 * pt(-abs(T_Stat), df = n_blocks - 1))
+# Now do the same, checking for differences in paired or not for all combinations of block type and variant effect
 
+for(BLOCK in c("Block","Chromosome")){
+for(EFFECT in c("LOW","MODERATE","HIGH")){
 
-
-
+      
+      # Get two vectors of RXY values
+      tmp1 <- rxy_dat %>% filter(Block==BLOCK,Variant_Effect=="MODIFIER") %>% pull(RXY)
+      tmp2 <- rxy_dat %>% filter(Block==BLOCK,Variant_Effect==EFFECT) %>% pull(RXY)
+      
+      # Do test
+      test=t.test(tmp1,tmp2,paired = T)
+      
+      # Print in nice format
+      print(paste0(EFFECT,
+                   ": ",BLOCK,
+                   ": Diff = ",round(test$estimate,3),
+                   ": SE = ", round(test$stderr,3),
+                   ": t = ",round(test$statistic,3),": p = ",round(test$p.value,3)))
+      
+    }
+  }
 
