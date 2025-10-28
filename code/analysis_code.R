@@ -295,21 +295,21 @@ for (i in seq_len(nrow(lengths))) {
   chr <- lengths$Scaffold[i]
   chr_len <- lengths$Length[i]
   
-  # number of blocks for this chromosome, at least 1
+  # Number of blocks for this chromosome, at least 1
   n_chr <- max(1, round(chr_len / block_size))
   chr_block_size <- chr_len / n_chr
   
-  # initial equal blocks inside this chromosome
+  # Initial equal blocks inside this chromosome
   edges <- round(seq(1, chr_len + 1, length.out = n_chr + 1))
   starts <- edges[-length(edges)]
   ends   <- edges[-1] - 1
   df <- data.frame(Scaffold = chr, Start = starts, End = ends)
   
-  # --- redistribute the last block if small ---
+  # Redistribute the last block if too small
   k <- nrow(df)
   if (k >= 2) {
     last_size <- df$End[k] - df$Start[k] + 1L
-    frac <- last_size / chr_block_size  # compare to *local* block size
+    frac <- last_size / chr_block_size
     
     if (last_size > 0 && frac <= 0.75) {
       if (frac <= 0.25)      m <- 2
@@ -324,13 +324,13 @@ for (i in seq_len(nrow(lengths))) {
       sizes[idx] <- sizes[idx] + add_base
       if (rem > 0L) sizes[tail(idx, rem)] <- sizes[tail(idx, rem)] + 1L
       
-      # drop the last block and rebuild Start/End
+      # Drop the last block and rebuild Start/End
       sizes <- sizes[-k]
       new_starts <- cumsum(c(1, head(sizes, -1)))
       new_ends   <- cumsum(sizes)
       df <- data.frame(Scaffold = chr, Start = new_starts, End = new_ends)
     }
-    # if frac > 0.75 → leave df unchanged
+    # If frac > 0.75 then leave df unchanged
   }
   
   blocks <- rbind(blocks, df)
